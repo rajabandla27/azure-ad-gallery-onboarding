@@ -127,7 +127,7 @@ function New-OktaAppFromCatalog {
     Write-Host "`nCreating '$AppName' from Okta catalog..." -ForegroundColor Cyan
     
     try {
-        # Prepare application configuration
+        # Prepare application configuration with manual assignment only
         $AppConfig = @{
             name = $CatalogApp.name
             label = $AppName
@@ -142,6 +142,14 @@ function New-OktaAppFromCatalog {
                         message = $null
                         helpUrl = $null
                     }
+                }
+            }
+            # Disable automatic assignment of Everyone group
+            profile = @{}
+            credentials = @{
+                userNameTemplate = @{
+                    template = '${source.login}'
+                    type = "BUILT_IN"
                 }
             }
         }
@@ -159,6 +167,19 @@ function New-OktaAppFromCatalog {
         # Wait for provisioning
         Write-Host "   Waiting for application to be fully provisioned..." -ForegroundColor Yellow
         Start-Sleep -Seconds 5
+        
+        # Set assignment policy to manual (no automatic Everyone assignment)
+        try {
+            Write-Host "   Setting manual assignment policy..." -ForegroundColor Yellow
+            $PolicyUpdate = @{
+                profile = @{}
+            } | ConvertTo-Json -Depth 3
+            
+            Invoke-RestMethod -Uri "$OktaDomain/api/v1/apps/$($NewApp.id)" -Headers $Headers -Method Put -Body $PolicyUpdate
+            Write-Host "   Assignment policy set to manual" -ForegroundColor Green
+        } catch {
+            Write-Warning "Could not set assignment policy: $($_.Exception.Message)"
+        }
         
         return $NewApp
         
@@ -365,11 +386,26 @@ function Add-OktaGroupAssignment {
                 # Group not assigned yet, proceed with assignment
             }
             
-            # Assign group to application
+            # First, remove "Everyone" group if it exists
+            try {
+                $EveryoneGroup = Invoke-RestMethod -Uri "$OktaDomain/api/v1/groups?q=Everyone" -Headers $Headers -Method Get | Where-Object { $_.profile.name -eq "Everyone" }
+                if ($EveryoneGroup) {
+                    Write-Host "   Removing default 'Everyone' group assignment..." -ForegroundColor Yellow
+                    Invoke-RestMethod -Uri "$OktaDomain/api/v1/apps/$($Application.id)/groups/$($EveryoneGroup.id)" -Headers $Headers -Method Delete
+                    Write-Host "   Removed 'Everyone' group" -ForegroundColor Green
+                }
+            } catch {
+                # Everyone group not assigned or error removing it, continue
+                Write-Host "   'Everyone' group not found or already removed" -ForegroundColor Gray
+            }
+            
+            # Assign specific group to application with proper role
             $AssignmentBody = @{
                 id = $GroupId
-            } | ConvertTo-Json
+                profile = @{}
+            } | ConvertTo-Json -Depth 3
             
+            Write-Host "   Assigning group '$($Group.profile.name)' to application..." -ForegroundColor Yellow
             $Assignment = Invoke-RestMethod -Uri "$OktaDomain/api/v1/apps/$($Application.id)/groups/$GroupId" -Headers $Headers -Method Put -Body $AssignmentBody
             Write-Host "   Successfully assigned group '$($Group.profile.name)' to application" -ForegroundColor Green
             
